@@ -1,0 +1,8 @@
+node_modules
+dist
+.vscode
+.git
+*.log
+coverage
+tests
+docker-compose.override.yml

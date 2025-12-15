@@ -1,0 +1,49 @@
+version: "3.9"
+
+networks:
+  streaming-backend-net:
+    external: true
+
+services:
+  streaming-backend-redis:
+    container_name: streaming-backend-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - streaming-backend-net
+    expose:
+      - "6379"
+    volumes:
+      - streaming-backend-redis-data:/data
+
+  streaming-backend-api:
+    container_name: streaming-backend-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: streaming-backend/api:latest
+    restart: unless-stopped
+    networks:
+      - streaming-backend-net
+    # EXPOSE is internal documentation — 'ports' publishes to host
+    ports:
+      - "17063:17063"   # <hostPort:containerPort>  <-- ONLY this port is exposed to outside
+    env_file:
+      - ./.env
+    environment:
+      # Provide multiple common env names so app reads PORT/DB regardless of variant
+      - PORT=${PORT}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+      - PGHOST=${DB_HOST}
+      - PGPORT=${DB_PORT}
+      - PGUSER=${DB_USER}
+      - PGPASSWORD=${DB_PASS}
+      - PGDATABASE=${DB_NAME}
+
+volumes:
+  streaming-backend-redis-data:
