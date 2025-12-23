@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import bcrypt from "bcryptjs";
 import { getDB } from "../../../config/db.config";
 import * as apiRes from "../../../utils/apiResponse";
-import { sendEmail, deleteMulterFile, deleteUploadedFile } from "../../../utils/functions";
+import { sendEmail, deleteMulterFile, deleteUploadedFile, getNextUserUniqueId } from "../../../utils/functions";
 import { ERROR, USER, MODEL, SUCCESS } from "../../../utils/responseMssg";
 import { PasswordService } from "../../../services/auth/password.service";
 import { log } from '../../../utils/logger';
@@ -41,9 +41,11 @@ export const addUser = async (req: Request<{}, {}, any>, res: Response, next: Ne
         const hashedPassword = await PasswordService.hashPassword(randomPassword);
 
         const now = new Date();
+        const unique_id = await getNextUserUniqueId();
+
         const [savedUser] = await db('users')
             .insert({
-                nickname: nickname || `member_${Date.now()}`,
+                nickname: nickname || `member_${unique_id}`,
                 email_address: email_address,
                 password_hash: hashedPassword,
                 role: 'user',

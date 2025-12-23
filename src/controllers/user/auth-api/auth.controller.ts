@@ -3,7 +3,7 @@ import { USER, SUCCESS, ERROR } from "../../../utils/responseMssg";
 import * as apiRes from "../../../utils/apiResponse";
 import { log } from "../../../utils/logger";
 import { getDB } from "../../../config/db.config";
-import { sendEmail } from "../../../utils/functions";
+import { sendEmail, getNextUserUniqueId } from "../../../utils/functions";
 import bcrypt from 'bcryptjs';
 import jwt from "jsonwebtoken";
 import { PasswordService } from "../../../services/auth/password.service";
@@ -55,16 +55,17 @@ export const signUp = async (req: Request, res: Response, next: NextFunction) =>
     // const otp: string = PasswordService.generateOTP();
     const otp: string = '123456';
     const otpHash = PasswordService.hashOTP(otp);
-    const otpExpire: Date = new Date(Date.now() + Number(process.env.OTP_EXPIRE_TIME) * 60 * 1000);
+    const otpExpire: Date = new Date(Date.now() + 20 * 60 * 1000);
 
     const now = new Date();
+    const unique_id = await getNextUserUniqueId();
 
     // Create new user
     const [savedUser] = await db('users')
       .insert({
         email_address: normalizedEmail,
         password_hash: hashedPassword,
-        nickname: nickname || `member_${Date.now()}`,
+        nickname: nickname || `member_${unique_id}`,
         role: role || 'user',
         status: 1,
         is_age_verified: false,
@@ -95,7 +96,7 @@ export const signUp = async (req: Request, res: Response, next: NextFunction) =>
         });
     }
 
-    let link = `${process.env.USER_VERIFY_URL}?email_token=${otp}&email_address=${normalizedEmail}&type=verify-email`;
+    let link = `${process.env.USER_VERIFY_URL}?email_token=${otpHash}&email_address=${normalizedEmail}&type=verify-email`;
 
     if (normalizedEmail) {
       const template = await db('email_templates')
@@ -106,7 +107,6 @@ export const signUp = async (req: Request, res: Response, next: NextFunction) =>
 
       if (template) {
         let content = (template?.content || "")
-          .replace("{User}", nickname || "User")
           .replace("{link}", link);
 
         const mailOptions = {
@@ -120,8 +120,9 @@ export const signUp = async (req: Request, res: Response, next: NextFunction) =>
     }
 
     apiRes.successResponseWithData(res, USER.verificationLinkSent, savedUser);
-  } catch (error) {
-    next(error)
+  } catch (error: any) {
+    log(error.message);
+    apiRes.errorResponse(res, ERROR.SomethingWrong);
   }
 };
 
@@ -185,7 +186,6 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
       return;
     }
 
-    // Update user details
     await db('users')
       .where('id', data.id)
       .update({
@@ -195,6 +195,39 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
         updated_at: db.fn.now()
       });
 
+    const trialPlan = await db('membership_plans')
+      .where('plan_type', 'trial')
+      .where('is_active', true)
+      .first();
+
+    if (trialPlan) {
+      const startDate = new Date();
+      startDate.setHours(12, 0, 0, 0);
+
+      const expirationDate = new Date();
+      expirationDate.setDate(expirationDate.getDate() + 7);
+      expirationDate.setHours(23, 59, 59, 999);
+
+      const existingMembership = await db('user_memberships')
+        .where('user_id', data.id)
+        .where('status', 1)
+        .first();
+
+      if (!existingMembership) {
+        await db('user_memberships').insert({
+          user_id: data.id,
+          membership_plan_id: trialPlan.id,
+          start_date: startDate,
+          expiration_date: expirationDate,
+          status: 1,
+          is_trial: true,
+          is_auto_renew: false,
+          created_at: startDate,
+          updated_at: startDate
+        });
+      }
+    }
+
     const result = await db('users').where('id', data.id).first();
 
     if (!result) {
@@ -202,23 +235,16 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
       return;
     }
 
-    // Get client info
     const clientIp = getClientIp(req);
     const userAgent = getUserAgent(req);
 
-    // Generate access token
-    const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
-      result.id,
-      process.env.TOKEN_SECRET_KEY_2!,
-      process.env.USER_TOKEN_EXPIRE_TIME || "24h"
-    );
+    await TokenService.revokeAllUserTokens(result.id, "Account verified, new session started");
+    await SessionService.endAllUserSessions(result.id);
 
-    // Generate refresh token
     const { token: refreshToken, jti: refreshJti, hash: refreshTokenHash } = TokenService.generateRefreshToken();
     const refreshExpiresAt = new Date();
     refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
 
-    // Store refresh token
     await TokenService.storeRefreshToken(
       result.id,
       null,
@@ -229,7 +255,6 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
       userAgent
     );
 
-    // Create session tracking
     const { sessionId, sessionToken } = await SessionService.trackSession(
       result.id,
       null,
@@ -238,7 +263,13 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
       refreshJti
     );
 
-    // Send success response with tokens
+    const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
+      result.id,
+      process.env.TOKEN_SECRET_KEY_2!,
+      process.env.USER_TOKEN_EXPIRE_TIME || "24h",
+      sessionId
+    );
+
     const { password_hash, otp_hash, ...userData } = result;
     apiRes.successResponseWithData(res, USER.otpVerified, {
       token: accessToken,
@@ -252,8 +283,9 @@ export const verifyMail = async (req: Request, res: Response, next: NextFunction
       },
       result: userData
     });
-  } catch (error) {
-    next(error);
+  } catch (error: any) {
+    log(error.message);
+    apiRes.errorResponse(res, ERROR.SomethingWrong);
   }
 };
 
@@ -269,10 +301,9 @@ export const resendVerifyMail = async (req: Request, res: Response, next: NextFu
       return;
     }
 
-    // Find user by email_address only (as per users table structure)
     const user = await db('users')
       .where('email_address', 'ilike', normalizedEmail)
-      .where('status', 1) // 1 = active
+      .where('status', 1)
       .select('id', 'nickname')
       .first();
 
@@ -285,7 +316,7 @@ export const resendVerifyMail = async (req: Request, res: Response, next: NextFu
     // const otp: string = PasswordService.generateOTP();
     const otp: string = '123456';
     const otpHash = PasswordService.hashOTP(otp);
-    const otpExpire: Date = new Date(Date.now() + Number(process.env.OTP_EXPIRE_TIME) * 60 * 1000);
+    const otpExpire: Date = new Date(Date.now() + 20 * 60 * 1000);
 
     let link = `${process.env.USER_VERIFY_URL}?email_token=${otpHash}&email_address=${normalizedEmail}&type=verify-email`;
 
@@ -349,10 +380,9 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
       return;
     }
 
-    // Query user by email_address only (as per users table structure)
     const data: any = await db('users')
       .where('email_address', 'ilike', normalizedEmail)
-      .where('status', '!=', 2) // 2 = deleted
+      .where('status', '!=', 2)
       .first();
 
     if (!data) {
@@ -360,24 +390,20 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
       return;
     }
 
-    if (data.status === 0 || data.status === 2) { // 0 = inactive, 2 = deleted
+    if (data.status === 0 || data.status === 2) {
       apiRes.errorResponse(res, USER.accountDeactivated);
       return;
     }
 
-    // Check if email is verified
     if (!data.email_verified) {
-
-      // Generate OTP securely
       // const otp: string = PasswordService.generateOTP();
       const otp: string = '123456';
       const otpHash = PasswordService.hashOTP(otp);
-      const otpExpire: Date = new Date(Date.now() + Number(process.env.OTP_EXPIRE_TIME) * 60 * 1000);
+      const otpExpire: Date = new Date(Date.now() + 20 * 60 * 1000);
 
-      let link = `${process.env.USER_VERIFY_URL}?email_token=${otp}&email_address=${normalizedEmail}&type=verify-email`;
+      let link = `${process.env.USER_VERIFY_URL}?email_token=${otpHash}&email_address=${normalizedEmail}&type=verify-email`;
 
       if (normalizedEmail) {
-        // Fetch email template
         const template = await db('email_templates')
           .where('slug', process.env.VERIFY_ACCOUNT_USER)
           .where('status', 1)
@@ -386,22 +412,18 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
 
         if (template) {
           let content = (template?.content || "")
-            .replace("{User}", data.nickname || "User")
             .replace("{link}", link);
 
-          // Email details
           const mailOptions = {
             email: normalizedEmail,
             subject: template.subject,
             message: content
           };
 
-          // Send email
           sendEmail(mailOptions);
         }
       }
 
-      // Update last login timestamp
       await db('users')
         .where('id', data.id)
         .update({
@@ -413,7 +435,6 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
       return;
     }
 
-    // Verify password
     const match = await PasswordService.verifyPassword(password, data.password_hash);
 
     if (!match) {
@@ -421,23 +442,17 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
       return;
     }
 
-    // Get client info
     const clientIp = getClientIp(req);
     const userAgent = getUserAgent(req);
 
-    // Generate access token
-    const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
-      data.id,
-      process.env.TOKEN_SECRET_KEY_2!,
-      process.env.USER_TOKEN_EXPIRE_TIME || "24h"
-    );
+    // Revoke all previous tokens and sessions (Single Session Policy)
+    await TokenService.revokeAllUserTokens(data.id, "New login on another device");
+    await SessionService.endAllUserSessions(data.id);
 
-    // Generate refresh token
     const { token: refreshToken, jti: refreshJti, hash: refreshTokenHash } = TokenService.generateRefreshToken();
     const refreshExpiresAt = new Date();
-    refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30); // 30 days
+    refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
 
-    // Store refresh token
     await TokenService.storeRefreshToken(
       data.id,
       null,
@@ -455,6 +470,13 @@ export const loginUser = async (req: AuthenticatedRequest, res: Response, next: 
       clientIp,
       userAgent,
       refreshJti
+    );
+
+    const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
+      data.id,
+      process.env.TOKEN_SECRET_KEY_2!,
+      process.env.USER_TOKEN_EXPIRE_TIME || "24h",
+      sessionId
     );
 
     // Update last login timestamp
@@ -493,11 +515,9 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
       return;
     }
 
-    // Find user by email_address only (as per users table structure)
     const user = await db('users')
       .where('email_address', 'ilike', normalizedEmail)
-      .where('status', 1) // 1 = active
-      .select('id')
+      .where('status', 1)
       .first();
 
     if (!user) {
@@ -509,12 +529,11 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
     // const otp: string = PasswordService.generateOTP();
     const otp: string = '123456';
     const otpHash = PasswordService.hashOTP(otp);
-    const otpExpire: Date = new Date(Date.now() + Number(process.env.OTP_EXPIRE_TIME) * 60 * 1000);
+    const otpExpire: Date = new Date(Date.now() + 20 * 60 * 1000);
 
-    let link = `${process.env.USER_VERIFY_URL}?email_token=${otp}&email_address=${normalizedEmail}&type=reset-password`;
+    let link = `${process.env.USER_VERIFY_URL}?email_token=${otpHash}&email_address=${normalizedEmail}&type=reset-password`;
 
     if (normalizedEmail) {
-      // Fetch email template
       const template = await db('email_templates')
         .where('slug', process.env.FORGOT_PASSWORD_USER)
         .where('status', 1)
@@ -523,22 +542,20 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
 
       if (template) {
         let content = (template?.content || "")
+          .replace("{Nickname}", user.nickname || "Member")
           .replace("{otp}", link)
-          .replace("{otpExpire}", process.env.OTP_EXPIRE_TIME || "");
+          .replace("{otpExpire}", "20");
 
-        // Email details
         const mailOptions = {
           email: normalizedEmail,
           subject: template.subject,
           message: content
         };
 
-        // Send email
         sendEmail(mailOptions);
       }
     }
 
-    // Update user with new OTP and expiration time
     await db('users')
       .where('id', user.id)
       .update({
@@ -547,9 +564,7 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
         updated_at: db.fn.now()
       });
 
-    // Send success response
     apiRes.successResponse(res, USER.otpSent);
-
   } catch (error) {
     next(error);
   }
@@ -669,7 +684,7 @@ export const resendOtp = async (req: Request, res: Response, next: NextFunction)
     // Generate OTP securely
     const otp: string = PasswordService.generateOTP();
     const otpHash = PasswordService.hashOTP(otp);
-    const otpExpire: Date = new Date(Date.now() + Number(process.env.OTP_EXPIRE_TIME) * 60 * 1000);
+    const otpExpire: Date = new Date(Date.now() + 20 * 60 * 1000);
 
     if (normalizedEmail) {
       // Fetch email template
@@ -682,7 +697,7 @@ export const resendOtp = async (req: Request, res: Response, next: NextFunction)
       if (template) {
         let content = (template?.content || "")
           .replace("{otp}", otp)
-          .replace("{otpExpire}", process.env.OTP_EXPIRE_TIME || "");
+          .replace("{otpExpire}", "20");
 
         // Email details
         const mailOptions = {
@@ -833,8 +848,9 @@ export const changePassword = async (req: AuthenticatedRequest, res: Response, n
 
     const userId = req.user._id || req.user.id;
     const result: any = await db('users').where('id', userId).first();
+
     if (!result || !(await PasswordService.verifyPassword(req.body.oldPassword, result.password_hash))) {
-      apiRes.errorResponse(res, USER.passwordInvalid);
+      apiRes.errorResponse(res, USER.oldPasswordInvalid);
       return;
     }
 
@@ -1002,10 +1018,15 @@ export const refreshToken = async (req: Request, res: Response, next: NextFuncti
       ? process.env.ADMIN_TOKEN_EXPIRE || "24h"
       : process.env.USER_TOKEN_EXPIRE_TIME || "24h";
 
+    const session = await db("session_tracking")
+      .where("refresh_token_jti", storedToken.jti)
+      .first();
+
     const { token: accessToken } = TokenService.generateAccessToken(
       userId || adminId!,
       tokenSecret,
-      tokenExpiry
+      tokenExpiry,
+      session?.id
     );
 
     // Update session with new refresh token JTI

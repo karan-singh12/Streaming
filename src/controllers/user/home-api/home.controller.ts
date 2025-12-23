@@ -9,6 +9,7 @@ interface AuthenticatedRequest extends Request {
     user?: any;
 }
 
+// for join stream
 export const joinStream = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
@@ -20,12 +21,10 @@ export const joinStream = async (req: AuthenticatedRequest, res: Response, next:
             return;
         }
 
-        // Determine room type and get streamer info
         let streamerId: number;
         let roomType: string;
         let billingRate: number;
 
-        // Check if it's a pyramid room
         const pyramidRoom = await db('pyramid_rooms')
             .where('id', parseInt(roomId))
             .first();
@@ -153,6 +152,7 @@ export const joinStream = async (req: AuthenticatedRequest, res: Response, next:
     }
 };
 
+// for get pyramid rooms
 export const pyramidRooms = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
@@ -172,6 +172,7 @@ export const pyramidRooms = async (req: AuthenticatedRequest, res: Response, nex
                 'pyramid_rooms.entry_timestamp',
                 'pyramid_rooms.created_at',
                 'pyramid_rooms.updated_at',
+                'pyramid_rooms.metadata',
                 'streamers.id as streamer_id',
                 'streamers.unique_id as streamer_unique_id',
                 'streamers.thumbnail as streamer_thumbnail',
@@ -194,6 +195,7 @@ export const pyramidRooms = async (req: AuthenticatedRequest, res: Response, nex
             entry_timestamp: room.entry_timestamp,
             created_at: room.created_at,
             updated_at: room.updated_at,
+            metadata: room.metadata,
             current_streamer: room.current_streamer_id ? {
                 streamer_id: room.streamer_id,
                 unique_id: room.streamer_unique_id,
@@ -219,6 +221,283 @@ export const pyramidRooms = async (req: AuthenticatedRequest, res: Response, nex
     }
 };
 
+// for get cam2cam rooms
+export const cam2camRooms = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const { pageNumber = 1, pageSize = 10 } = req.body;
+        const offset = (pageNumber - 1) * pageSize;
+
+        const baseQuery = db('room_sessions')
+            .where('room_sessions.room_status', 1)
+            .where('room_sessions.room_type', 'cam2cam');
+
+        // Get total count
+        const totalResult = await baseQuery.clone().count('room_sessions.id as count').first();
+        const totalRecords = totalResult ? Number(totalResult.count) : 0;
+
+        const cam2camRoomsList = await baseQuery
+            .join('streamers', 'room_sessions.streamer_id', 'streamers.id')
+            .join('users', 'streamers.user_id', 'users.id')
+            .leftJoin('cam2cam_sessions', 'room_sessions.id', 'cam2cam_sessions.room_session_id')
+            .select(
+                'room_sessions.id',
+                'room_sessions.streamer_id',
+                'room_sessions.room_status',
+                'room_sessions.room_type',
+                'room_sessions.session_start',
+                'room_sessions.session_end',
+                'room_sessions.created_at',
+                'room_sessions.metadata',
+                'streamers.id as streamer_profile_id',
+                'streamers.unique_id as streamer_unique_id',
+                'streamers.thumbnail as streamer_thumbnail',
+                'streamers.theme_description as theme_description',
+                'streamers.is_online as streamer_is_online',
+                'users.id as user_id',
+                'users.email_address',
+                'users.nickname',
+                'users.avatar as user_avatar',
+                'cam2cam_sessions.id as cam2cam_session_id',
+                'cam2cam_sessions.package_price',
+                'cam2cam_sessions.package_duration_minutes',
+                'cam2cam_sessions.connection_initiated',
+                'cam2cam_sessions.viewer_id as cam2cam_viewer_id'
+            )
+            .orderBy('room_sessions.created_at', 'desc')
+            .limit(pageSize)
+            .offset(offset);
+
+        const formattedRooms = cam2camRoomsList.map((room: any) => ({
+            id: room.id,
+            room_status: room.room_status,
+            room_type: room.room_type,
+            session_start: room.session_start,
+            session_end: room.session_end,
+            created_at: room.created_at,
+            metadata: room.metadata,
+            current_streamer: {
+                streamer_id: room.streamer_profile_id,
+                unique_id: room.streamer_unique_id,
+                thumbnail: room.streamer_thumbnail,
+                theme_description: room.theme_description,
+                is_online: room.streamer_is_online,
+                user_id: room.user_id,
+                email_address: room.email_address,
+                nickname: room.nickname,
+                avatar: room.user_avatar
+            },
+            cam2cam_session: room.cam2cam_session_id ? {
+                id: room.cam2cam_session_id,
+                package_price: Number(room.package_price),
+                package_duration_minutes: room.package_duration_minutes,
+                connection_initiated: room.connection_initiated,
+                viewer_id: room.cam2cam_viewer_id
+            } : null
+        }));
+
+        apiRes.successResponseWithData(res, SUCCESS.dataFound || 'Cam2Cam rooms retrieved successfully', {
+            rooms: formattedRooms,
+            totalRecords,
+            pageNumber,
+            pageSize
+        });
+
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get pyramid room details by id
+export const getPyramidRoomDetails = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const { roomId } = req.params;
+
+        if (!roomId) {
+            apiRes.errorResponse(res, "Room ID is required");
+            return;
+        }
+
+        const room = await db('pyramid_rooms')
+            .where('pyramid_rooms.id', roomId)
+            .leftJoin('streamers', 'pyramid_rooms.current_streamer_id', 'streamers.id')
+            .leftJoin('users', 'streamers.user_id', 'users.id')
+            .select(
+                'pyramid_rooms.id',
+                'pyramid_rooms.room_position',
+                'pyramid_rooms.current_streamer_id',
+                'pyramid_rooms.room_status',
+                'pyramid_rooms.is_pinned',
+                'pyramid_rooms.billing_rate_per_minute',
+                'pyramid_rooms.entry_timestamp',
+                'pyramid_rooms.created_at',
+                'pyramid_rooms.updated_at',
+                'pyramid_rooms.metadata',
+                'streamers.id as streamer_id',
+                'streamers.unique_id as streamer_unique_id',
+                'streamers.thumbnail as streamer_thumbnail',
+                'streamers.theme_description as theme_description',
+                'streamers.is_online as streamer_is_online',
+                'users.id as user_id',
+                'users.email_address',
+                'users.nickname',
+                'users.avatar as user_avatar'
+            )
+            .first();
+
+        if (!room) {
+            apiRes.errorResponse(res, "Pyramid room not found");
+            return;
+        }
+
+        const formattedRoom = {
+            id: room.id,
+            room_position: room.room_position,
+            room_status: room.room_status,
+            is_pinned: room.is_pinned,
+            billing_rate_per_minute: Number(room.billing_rate_per_minute),
+            entry_timestamp: room.entry_timestamp,
+            created_at: room.created_at,
+            updated_at: room.updated_at,
+            metadata: room.metadata,
+            current_streamer: room.current_streamer_id ? {
+                streamer_id: room.streamer_id,
+                unique_id: room.streamer_unique_id,
+                thumbnail: room.streamer_thumbnail,
+                theme_description: room.theme_description,
+                is_online: room.streamer_is_online,
+                user_id: room.user_id,
+                email_address: room.email_address,
+                nickname: room.nickname,
+                avatar: room.user_avatar
+            } : null
+        };
+
+        apiRes.successResponseWithData(res, SUCCESS.dataFound, formattedRoom);
+
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get room session details by id (cam2cam)
+export const getRoomSessionDetails = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const { roomId } = req.params;
+
+        if (!roomId) {
+            apiRes.errorResponse(res, "Session ID is required");
+            return;
+        }
+
+        const room = await db('room_sessions')
+            .where('room_sessions.id', roomId)
+            .join('streamers', 'room_sessions.streamer_id', 'streamers.id')
+            .join('users', 'streamers.user_id', 'users.id')
+            .leftJoin('cam2cam_sessions', 'room_sessions.id', 'cam2cam_sessions.room_session_id')
+            .select(
+                'room_sessions.id',
+                'room_sessions.streamer_id',
+                'room_sessions.room_status',
+                'room_sessions.room_type',
+                'room_sessions.session_start',
+                'room_sessions.session_end',
+                'room_sessions.created_at',
+                'room_sessions.metadata',
+                'streamers.id as streamer_profile_id',
+                'streamers.unique_id as streamer_unique_id',
+                'streamers.thumbnail as streamer_thumbnail',
+                'streamers.theme_description as theme_description',
+                'streamers.is_online as streamer_is_online',
+                'users.id as user_id',
+                'users.email_address',
+                'users.nickname',
+                'users.avatar as user_avatar',
+                'cam2cam_sessions.id as cam2cam_session_id',
+                'cam2cam_sessions.package_price',
+                'cam2cam_sessions.package_duration_minutes',
+                'cam2cam_sessions.connection_initiated',
+                'cam2cam_sessions.viewer_id as cam2cam_viewer_id'
+            )
+            .first();
+
+        if (!room) {
+            apiRes.errorResponse(res, "Room session not found");
+            return;
+        }
+
+        const formattedRoom = {
+            id: room.id,
+            room_status: room.room_status,
+            room_type: room.room_type,
+            session_start: room.session_start,
+            session_end: room.session_end,
+            created_at: room.created_at,
+            metadata: room.metadata,
+            current_streamer: {
+                streamer_id: room.streamer_profile_id,
+                unique_id: room.streamer_unique_id,
+                thumbnail: room.streamer_thumbnail,
+                theme_description: room.theme_description,
+                is_online: room.streamer_is_online,
+                user_id: room.user_id,
+                email_address: room.email_address,
+                nickname: room.nickname,
+                avatar: room.user_avatar
+            },
+            cam2cam_session: room.cam2cam_session_id ? {
+                id: room.cam2cam_session_id,
+                package_price: Number(room.package_price),
+                package_duration_minutes: room.package_duration_minutes,
+                connection_initiated: room.connection_initiated,
+                viewer_id: room.cam2cam_viewer_id
+            } : null
+        };
+
+        apiRes.successResponseWithData(res, SUCCESS.dataFound, formattedRoom);
+
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for end stream
+export const endStream = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const userId = (req as any).user?.id || (req as any).user?._id;
+
+        if (!userId) {
+            return apiRes.errorResponse(res, "User not identified");
+        }
+
+        const stream = await db("room_sessions").where("user_id", userId).first();
+
+        if (!stream) {
+            return apiRes.errorResponse(res, "Stream not found");
+        }
+
+        await db("room_sessions").where("user_id", userId).update({
+            session_end: new Date()
+        });
+
+        apiRes.successResponse(res, "Stream ended successfully");
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get top streamers by traffic
 export const getTopStreamersByTraffic = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
@@ -276,6 +555,130 @@ export const getTopStreamersByTraffic = async (req: AuthenticatedRequest, res: R
     } catch (error: any) {
         log(error.message);
         apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for follow streamer
+export const followStreamer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const userId = (req as any).user?.id || (req as any).user?._id;
+        const { streamerId } = req.body;
+
+        if (!userId || !streamerId) {
+            apiRes.errorResponse(res, USER.accountNotExists);
+            return;
+        }
+
+        const follow = await db("follows").where("user_id", userId).where("streamer_id", streamerId).first();
+
+        if (follow) {
+            apiRes.errorResponse(res, USER.alreadyFollowed);
+            return;
+        }
+
+        await db("follows").insert({
+            user_id: userId,
+            streamer_id: streamerId,
+            created_at: new Date()
+        });
+
+        apiRes.successResponse(res, USER.followedSuccessfully);
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for unfollow streamer
+export const unfollowStreamer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const userId = (req as any).user?.id || (req as any).user?._id;
+        const { streamerId } = req.body;
+
+        if (!userId || !streamerId) {
+            apiRes.errorResponse(res, USER.accountNotExists);
+            return;
+        }
+
+        const follow = await db("follows").where("user_id", userId).where("streamer_id", streamerId).first();
+
+        if (!follow) {
+            apiRes.errorResponse(res, USER.notFollowing);
+            return;
+        }
+
+        await db("follows").where("user_id", userId).where("streamer_id", streamerId).del();
+
+        apiRes.successResponse(res, USER.unfollowedSuccessfully);
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get user follows
+export const getUserFollows = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const db = getDB();
+        const userId = (req as any).user?.id || (req as any).user?._id;
+
+        if (!userId) {
+            apiRes.errorResponse(res, USER.accountNotExists);
+            return;
+        }
+
+        const follows = await db("follows").where("user_id", userId);
+
+        apiRes.successResponseWithData(res, USER.followsRetrievedSuccessfully, follows);
+    } catch (error: any) {
+        log(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get user membership
+export const getUserMembership = async (req: Request, res: Response) => {
+    try {
+        const db = getDB();
+        const userId = (req as any).user?.id || (req as any).user?._id;
+
+        if (!userId) {
+            apiRes.errorResponse(res, USER.accountNotExists);
+            return;
+        }
+
+        const membership = await db("user_memberships")
+            .where("user_id", userId)
+            .where("status", 1)
+            .first();
+
+        apiRes.successResponse(res, SUCCESS.dataFound, membership);
+    } catch (error: any) {
+        console.error(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong);
+        return;
+    }
+};
+
+// for get membership plans
+export const getPlans = async (req: Request, res: Response) => {
+    try {
+        const db = getDB();
+        const plans = await db("membership_plans")
+            .where("is_active", true)
+            .orderBy("display_order", "asc")
+            .select("*");
+
+        apiRes.successResponse(res, SUCCESS.dataFound, plans);
+    } catch (error: any) {
+        console.error(error.message);
+        apiRes.errorResponse(res, ERROR.SomethingWrong)
         return;
     }
 };

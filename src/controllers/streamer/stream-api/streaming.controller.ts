@@ -4,16 +4,12 @@ import * as apiRes from "../../../utils/apiResponse";
 import { log } from "../../../utils/logger";
 import { generateWowzaPublisherToken } from '../../../services/streaming/wowza.service';
 import { getDB } from "../../../config/db.config";
-// import { AuthenticatedRequest } from '../../types/auth.types';
-
-interface AuthenticatedRequest extends Request {
-    user?: any;
-}
+import { AuthenticatedRequest } from '../../../types/auth.types';
 
 export const startStream = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
-        const userId = req.user?.id || req.user?._id;
+        const userId = String(req.user?.id || req.user?._id || '');
         const { streamerName, type, billingRatePerMin = 0.1 } = req.body;
 
         if (!req.user) {
@@ -26,7 +22,6 @@ export const startStream = async (req: AuthenticatedRequest, res: Response, next
             return;
         }
 
-        // Get streamer profile for this user
         const streamer = await db('streamers')
             .where('user_id', parseInt(userId))
             .first();
@@ -36,73 +31,136 @@ export const startStream = async (req: AuthenticatedRequest, res: Response, next
             return;
         }
 
-        // Check if streamer already has an active stream in a pyramid room
-        const existingPyramidRoom = await db('pyramid_rooms')
-            .where('current_streamer_id', streamer.id)
-            .where('room_status', 1)
-            .first();
-
-        if (existingPyramidRoom) {
-            apiRes.errorResponse(res, 'You already have an active stream in a pyramid room');
-            return;
-        }
-
         let roomId = null;
-        if (type === 'public') {
-            const totalRooms = await db('pyramid_rooms')
-                .where('room_status', '!=', 2)
-                .count('* as count')
-                .first();
 
-            const roomCount = totalRooms ? Number(totalRooms.count) : 0;
-            const MAX_PYRAMID_ROOMS = 10;
+        switch (type) {
+            case 'public':
 
-            if (roomCount < MAX_PYRAMID_ROOMS) {
-                const maxPosition = await db('pyramid_rooms')
-                    .where('room_status', '!=', 2)
-                    .max('room_position as maxPos')
+                const existingPyramidRoom = await db('pyramid_rooms')
+                    .where('current_streamer_id', streamer.id)
+                    .where('room_status', 1)
                     .first();
 
-                const nextPosition = maxPosition && maxPosition.maxPos ? Number(maxPosition.maxPos) + 1 : 1;
-
-                const [newRoom] = await db('pyramid_rooms')
-                    .insert({
-                        room_position: nextPosition,
-                        current_streamer_id: streamer.id,
-                        room_status: 1,
-                        billing_rate_per_minute: billingRatePerMin || 0.1,
-                        entry_timestamp: db.fn.now(),
-                        created_at: db.fn.now(),
-                        updated_at: db.fn.now()
-                    })
-                    .returning('*');
-
-                roomId = newRoom.id;
-            } else {
-                const availableRoom = await db('pyramid_rooms')
-                    .where('room_status', '!=', 2)
-                    .whereNull('current_streamer_id')
-                    .orderBy('room_position', 'asc')
-                    .first();
-
-                if (!availableRoom) {
-                    apiRes.errorResponse(res, 'No available pyramid rooms. All rooms are currently occupied.');
+                if (existingPyramidRoom) {
+                    apiRes.errorResponse(res, 'You already have an active stream in a pyramid room');
                     return;
                 }
 
-                await db('pyramid_rooms')
-                    .where('id', availableRoom.id)
-                    .update({
-                        current_streamer_id: streamer.id,
+                const totalRooms = await db('pyramid_rooms')
+                    .where('room_status', '!=', 2)
+                    .count('* as count')
+                    .first();
+
+                const roomCount = totalRooms ? Number(totalRooms.count) : 0;
+                const MAX_PYRAMID_ROOMS = 10;
+
+                if (roomCount < MAX_PYRAMID_ROOMS) {
+                    const maxPosition = await db('pyramid_rooms')
+                        .where('room_status', '!=', 2)
+                        .max('room_position as maxPos')
+                        .first();
+
+                    const nextPosition = maxPosition && maxPosition.maxPos ? Number(maxPosition.maxPos) + 1 : 1;
+
+                    const [newRoom] = await db('pyramid_rooms')
+                        .insert({
+                            room_position: nextPosition,
+                            current_streamer_id: streamer.id,
+                            room_status: 1,
+                            billing_rate_per_minute: billingRatePerMin || 0.1,
+                            entry_timestamp: db.fn.now(),
+                            created_at: db.fn.now(),
+                            updated_at: db.fn.now(),
+                            metadata: {
+                                camera1: req.body.camera1,
+                                camera2: req.body.camera2,
+                                webrtc: req.body.webrtc,
+                                mediaDevices: req.body.mediaDevices,
+                                timestamp: req.body.timestamp
+                            }
+                        })
+                        .returning('*');
+
+                    roomId = newRoom.id;
+                } else {
+                    const availableRoom = await db('pyramid_rooms')
+                        .where('room_status', '!=', 2)
+                        .whereNull('current_streamer_id')
+                        .orderBy('room_position', 'asc')
+                        .first();
+
+                    if (!availableRoom) {
+                        apiRes.errorResponse(res, 'No available pyramid rooms. All rooms are currently occupied.');
+                        return;
+                    }
+
+                    await db('pyramid_rooms')
+                        .where('id', availableRoom.id)
+                        .update({
+                            current_streamer_id: streamer.id,
+                            room_status: 1,
+                            entry_timestamp: db.fn.now(),
+                            updated_at: db.fn.now(),
+                            metadata: {
+                                camera1: req.body.camera1,
+                                camera2: req.body.camera2,
+                                webrtc: req.body.webrtc,
+                                mediaDevices: req.body.mediaDevices,
+                                timestamp: req.body.timestamp
+                            }
+                        });
+
+                    roomId = availableRoom.id;
+                }
+                break;
+            case 'cam2cam':
+
+                const existingCam2CamRoom = await db('cam2cam_sessions')
+                    .where('streamer_id', streamer.id)
+                    .where('room_status', 1)
+                    .first();
+
+                if (existingCam2CamRoom) {
+                    apiRes.errorResponse(res, 'You already have an active stream in a cam2cam room');
+                    return;
+                }
+
+                let roomSession = await db('room_sessions')
+                    .where('streamer_id', streamer.id)
+                    .where('room_type', 'cam2cam')
+                    .where('room_status', 1)
+                    .first();
+
+                if (roomSession) {
+                    apiRes.errorResponse(res, 'You already have an active stream in a cam2cam room');
+                    return;
+                }
+
+                const [newRoomSession] = await db('room_sessions')
+                    .insert({
+                        streamer_id: streamer.id,
+                        room_type: 'cam2cam',
                         room_status: 1,
-                        entry_timestamp: db.fn.now(),
-                        updated_at: db.fn.now()
-                    });
+                        session_start: db.fn.now(),
+                        created_at: db.fn.now(),
+                        metadata: {
+                            streamerName: 'mscyv@getnada.com',
+                            type: 'public',
+                            camera1: req.body.camera1,
+                            camera2: req.body.camera2,
+                            webrtc: req.body.webrtc,
+                            mediaDevices: req.body.mediaDevices,
+                            timestamp: req.body.timestamp
+                        }
+                    })
+                    .returning('*');
 
-                roomId = availableRoom.id;
-            }
-        } else if (type === 'cam2cam') {
+                roomId = newRoomSession.id;
 
+                break;
+            default:
+                apiRes.errorResponse(res, 'Invalid stream type');
+                return;
         }
 
         await db('streamers')
@@ -144,7 +202,7 @@ export const endSession = async (req: AuthenticatedRequest, res: Response, next:
     try {
         const db = getDB();
         const { sessionId } = req.body;
-        const userId = req.user?.id || req.user?._id;
+        const userId = String(req.user?.id || req.user?._id || '');
 
         const session = await db('room_sessions')
             .where('id', parseInt(sessionId))
@@ -221,7 +279,7 @@ export const endSession = async (req: AuthenticatedRequest, res: Response, next:
 export const endStream = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
-        const userId = req.user?.id || req.user?._id;
+        const userId = String(req.user?.id || req.user?._id || '');
         const { type, roomId } = req.body;
 
         // Get streamer for this user
@@ -234,15 +292,14 @@ export const endStream = async (req: AuthenticatedRequest, res: Response, next: 
             return;
         }
 
-        // Find pyramid room - either by roomId or by streamer ID
         let pyramidRoom = null;
+
         if (roomId) {
             pyramidRoom = await db('pyramid_rooms')
                 .where('id', parseInt(roomId))
                 .where('current_streamer_id', streamer.id)
                 .first();
         } else {
-            // If roomId not provided, find by streamer ID
             pyramidRoom = await db('pyramid_rooms')
                 .where('current_streamer_id', streamer.id)
                 .where('room_status', 1) // 1 = active
@@ -287,7 +344,6 @@ export const endStream = async (req: AuthenticatedRequest, res: Response, next: 
                     updated_at: db.fn.now()
                 });
         } else {
-            // For cam2cam, end all active sessions for this streamer
             activeSessions = await db('room_sessions')
                 .where('streamer_id', streamer.id)
                 .where('room_type', 'cam2cam')
@@ -344,8 +400,8 @@ export const endStream = async (req: AuthenticatedRequest, res: Response, next: 
 export const reconnectStream = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const db = getDB();
-        const userId = req.user?.id || req.user?._id;
-        const { streamerName } = req.body;
+        const userId = String(req.user?.id || req.user?._id || '');
+        const { streamerName, type } = req.body;
 
         if (!req.user) {
             apiRes.errorResponse(res, USER.accountNotExists);
@@ -357,7 +413,6 @@ export const reconnectStream = async (req: AuthenticatedRequest, res: Response, 
             return;
         }
 
-        // Get streamer profile for this user
         const streamer = await db('streamers')
             .where('user_id', parseInt(userId))
             .first();
@@ -367,61 +422,114 @@ export const reconnectStream = async (req: AuthenticatedRequest, res: Response, 
             return;
         }
 
-        // Find active pyramid room for this streamer
-        const pyramidRoom = await db('pyramid_rooms')
-            .where('current_streamer_id', streamer.id)
-            .where('room_status', 1) // 1 = active
-            .first();
+        if (type === 'cam2cam') {
+            const roomSession = await db('room_sessions')
+                .where('streamer_id', streamer.id)
+                .where('room_type', 'cam2cam')
+                .where('room_status', 1)
+                .orderBy('id', 'desc')
+                .first();
 
-        if (!pyramidRoom) {
-            apiRes.errorResponse(res, 'No active stream found. Please start a new stream.');
-            return;
-        }
+            if (!roomSession) {
+                apiRes.errorResponse(res, 'No active cam2cam session found. Please start a new stream.');
+                return;
+            }
 
-        // Verify the room still belongs to this streamer
-        if (pyramidRoom.current_streamer_id !== streamer.id) {
-            apiRes.errorResponse(res, 'Stream room is no longer assigned to you');
-            return;
-        }
+            await db('streamers')
+                .where('id', streamer.id)
+                .update({
+                    is_online: true,
+                    updated_at: db.fn.now()
+                });
 
-        // Update streamer status to online (in case it was marked offline due to disconnection)
-        await db('streamers')
-            .where('id', streamer.id)
-            .update({
-                is_online: true,
-                updated_at: db.fn.now()
+            // Update room session metadata if provided
+            const metadata = {
+                camera1: req.body.camera1,
+                camera2: req.body.camera2,
+                webrtc: req.body.webrtc,
+                mediaDevices: req.body.mediaDevices,
+                timestamp: req.body.timestamp
+            };
+
+            await db('room_sessions')
+                .where('id', roomSession.id)
+                .update({
+                    metadata,
+                    updated_at: db.fn.now()
+                });
+
+            const publisherData = await generateWowzaPublisherToken(streamerName);
+
+            apiRes.successResponseWithData(res, 'Stream reconnected successfully', {
+                roomId: roomSession.id,
+                streamKey: streamerName,
+                publisherData,
+                type: 'cam2cam',
+                status: 'reconnected',
+                created_at: roomSession.created_at,
+                metadata: metadata
             });
+            return;
+        } else {
+            const pyramidRoom = await db('pyramid_rooms')
+                .where('current_streamer_id', streamer.id)
+                .where('room_status', 1)
+                .first();
 
-        // Update pyramid room entry timestamp (to track reconnection)
-        await db('pyramid_rooms')
-            .where('id', pyramidRoom.id)
-            .update({
-                entry_timestamp: db.fn.now(),
-                updated_at: db.fn.now()
+            if (!pyramidRoom) {
+                apiRes.errorResponse(res, 'No active stream found. Please start a new stream.');
+                return;
+            }
+
+            if (pyramidRoom.current_streamer_id !== streamer.id) {
+                apiRes.errorResponse(res, 'Stream room is no longer assigned to you');
+                return;
+            }
+
+            await db('streamers')
+                .where('id', streamer.id)
+                .update({
+                    is_online: true,
+                    updated_at: db.fn.now()
+                });
+
+            const metadata = {
+                camera1: req.body.camera1,
+                camera2: req.body.camera2,
+                webrtc: req.body.webrtc,
+                mediaDevices: req.body.mediaDevices,
+                timestamp: req.body.timestamp
+            };
+
+            await db('pyramid_rooms')
+                .where('id', pyramidRoom.id)
+                .update({
+                    entry_timestamp: db.fn.now(),
+                    updated_at: db.fn.now(),
+                    metadata
+                });
+
+            const publisherData = await generateWowzaPublisherToken(streamerName);
+
+            const billingRate = Number(pyramidRoom.billing_rate_per_minute);
+
+
+            apiRes.successResponseWithData(res, 'Stream reconnected successfully', {
+                roomId: pyramidRoom.id,
+                room_position: pyramidRoom.room_position,
+                streamKey: streamerName,
+                publisherData,
+                type: 'public',
+                billingRatePerMin: billingRate,
+                status: 'reconnected',
+                entry_timestamp: pyramidRoom.entry_timestamp,
+                metadata: metadata
             });
-
-        // Generate new publisher token for reconnection
-        const publisherData = await generateWowzaPublisherToken(streamerName);
-
-        // Get billing rate
-        const billingRate = Number(pyramidRoom.billing_rate_per_minute);
-
-        apiRes.successResponseWithData(res, 'Stream reconnected successfully', {
-            roomId: pyramidRoom.id,
-            room_position: pyramidRoom.room_position,
-            streamKey: streamerName,
-            publisherData,
-            type: 'public',
-            billingRatePerMin: billingRate,
-            status: 'reconnected',
-            entry_timestamp: pyramidRoom.entry_timestamp
-        });
+        }
 
     } catch (error: any) {
         log(error.message);
-
         apiRes.errorResponse(res, ERROR.SomethingWrong);
-
         return;
     }
 };

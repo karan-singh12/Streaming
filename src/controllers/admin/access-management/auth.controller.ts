@@ -4,11 +4,12 @@ import { ADMIN, SUCCESS, ERROR, AUTH } from "../../../utils/responseMssg";
 import * as apiRes from "../../../utils/apiResponse";
 import { getDB } from "../../../config/db.config";
 import { sendEmail } from "../../../utils/functions";
-import bcrypt from "bcryptjs";
+import bcrypt from 'bcryptjs';
 import jwt from "jsonwebtoken";
 import { log } from "../../../utils/logger";
 import { PasswordService } from "../../../services/auth/password.service";
 import { TokenService } from "../../../services/auth/token.service";
+import { SessionService } from "../../../services/auth/session.service";
 import { getClientIp, getUserAgent } from "../../../utils/requestHelpers";
 
 interface AuthenticatedRequest extends Request {
@@ -16,11 +17,7 @@ interface AuthenticatedRequest extends Request {
 }
 
 // Admin registration controller
-export const addAdmin = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const addAdmin = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { name, email_address, password } = req.body;
 
@@ -34,54 +31,49 @@ export const addAdmin = async (
   }
 };
 
-export const loginAdmin = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const loginAdmin = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     const email = req.body.email_address?.toLowerCase();
 
-    const data: any = await db("admins")
-      .where("email_address", "ilike", email)
-      .where("status", "!=", 2)
+    const data: any = await db('admins')
+      .where('email_address', 'ilike', email)
+      .where('status', '!=', 2)
       .first();
 
     if (!data) {
       apiRes.validationError(res, ADMIN.accountNotExists);
-      return;
+      return
     }
 
-    const match = await PasswordService.verifyPassword(
-      req.body.password,
-      data.password_hash
-    );
+    const match = await PasswordService.verifyPassword(req.body.password, data.password_hash);
     if (!match) {
       apiRes.errorResponse(res, ADMIN.invalidLogin);
-      return;
+      return
     }
 
     // Generate 6-digit OTP
-    const otp = "123456";
+    const otp = '123456';
     const otpHash = PasswordService.hashOTP(otp);
-    const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    const otpExpires = new Date(Date.now() + 20 * 60 * 1000);
 
     // Save OTP to database
-    await db("admins").where("id", data.id).update({
-      login_otp_hash: otpHash,
-      login_otp_expires_at: otpExpires,
-      updated_at: db.fn.now(),
-    });
+    await db('admins')
+      .where('id', data.id)
+      .update({
+        login_otp_hash: otpHash,
+        login_otp_expires_at: otpExpires,
+        updated_at: db.fn.now()
+      });
 
     // Send OTP email
-    const template = await db("email_templates")
-      .where("slug", "login_otp")
-      .where("status", 1)
+    const template = await db('email_templates')
+      .where('slug', 'login_otp')
+      .where('status', 1)
       .first();
 
-    let emailContent = `Your login OTP is: <strong>${otp}</strong><br>This OTP will expire in 10 minutes.`;
-    let emailSubject = "Your Login OTP";
+    let emailContent = `Your login OTP is: <strong>${otp}</strong><br>This OTP will expire in 20 minutes.`;
+    let emailSubject = 'Your Login OTP';
 
     if (template) {
       emailContent = (template.content || "")
@@ -93,17 +85,13 @@ export const loginAdmin = async (
     await sendEmail({
       email: data.email_address,
       subject: emailSubject,
-      message: emailContent,
+      message: emailContent
     });
 
-    apiRes.successResponseWithData(
-      res,
-      "OTP sent to your email. Please verify to continue login.",
-      {
-        otpRequired: true,
-        adminId: data.id,
-      }
-    );
+    apiRes.successResponseWithData(res, "OTP sent to your email. Please verify to continue login.", {
+      otpRequired: true,
+      adminId: data.id
+    });
   } catch (error: any) {
     log(error.message);
 
@@ -113,11 +101,7 @@ export const loginAdmin = async (
   }
 };
 
-export const verifyOTP = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const verifyOTP = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     const { email_address, otp } = req.body;
@@ -127,9 +111,7 @@ export const verifyOTP = async (
       return;
     }
 
-    const admin: any = await db("admins")
-      .whereRaw("LOWER(email_address) = ?", [email_address.toLowerCase()])
-      .first();
+    const admin: any = await db("admins").whereRaw("LOWER(email_address) = ?", [email_address.toLowerCase()]).first();
     if (!admin) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
       return;
@@ -151,27 +133,22 @@ export const verifyOTP = async (
       return;
     }
 
-    await db("admins").where("id", admin.id).update({
-      login_otp_hash: null,
-      login_otp_expires_at: null,
-      updated_at: db.fn.now(),
-    });
+    await db("admins")
+      .where("id", admin.id)
+      .update({
+        login_otp_hash: null,
+        login_otp_expires_at: null,
+        updated_at: db.fn.now(),
+      });
 
     const clientIp = getClientIp(req);
     const userAgent = getUserAgent(req);
 
-    const { token: accessToken, jti: accessJti } =
-      TokenService.generateAccessToken(
-        admin.id,
-        process.env.TOKEN_SECRET_KEY_1!,
-        process.env.ADMIN_TOKEN_EXPIRE || "24h"
-      );
+    // Revoke all previous tokens and sessions (Single Session Policy)
+    await TokenService.revokeAllAdminTokens(admin.id, "Admin login on new device");
+    await SessionService.endAllAdminSessions(admin.id);
 
-    const {
-      token: refreshToken,
-      jti: refreshJti,
-      hash: refreshTokenHash,
-    } = TokenService.generateRefreshToken();
+    const { token: refreshToken, jti: refreshJti, hash: refreshTokenHash } = TokenService.generateRefreshToken();
     const refreshExpiresAt = new Date();
     refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
 
@@ -185,14 +162,24 @@ export const verifyOTP = async (
       userAgent
     );
 
+    // Create session tracking
+    const { sessionId, sessionToken } = await SessionService.trackSession(
+      null,
+      admin.id,
+      clientIp,
+      userAgent,
+      refreshJti
+    );
+
+    const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
+      admin.id,
+      process.env.TOKEN_SECRET_KEY_1!,
+      process.env.ADMIN_TOKEN_EXPIRE || "24h",
+      sessionId
+    );
+
     const updatedAdmin = await db("admins").where("id", admin.id).first();
-    const {
-      password_hash,
-      login_otp_hash,
-      login_otp_expires_at,
-      reset_password_token_hash,
-      ...result
-    } = updatedAdmin;
+    const { password_hash, login_otp_hash, login_otp_expires_at, reset_password_token_hash, ...result } = updatedAdmin;
 
     apiRes.successResponseWithData(res, ADMIN.loginSuccess, {
       token: accessToken,
@@ -209,11 +196,7 @@ export const verifyOTP = async (
   }
 };
 
-export const forgotPassword = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const forgotPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     const email_address = req.body.email_address?.toLowerCase();
@@ -223,37 +206,32 @@ export const forgotPassword = async (
       return;
     }
 
-    const result = await db("admins")
-      .where("email_address", email_address)
-      .first();
+    const result = await db('admins').where('email_address', email_address).first();
     if (!result) {
       apiRes.errorResponse(res, ADMIN.emailNotExists);
-      return;
+      return
     }
 
     // Generate reset token
     // const resetPasswordToken = PasswordService.generateResetToken();
     const resetPasswordToken = "123456";
 
-    const resetPasswordTokenHash =
-      PasswordService.hashToken(resetPasswordToken);
+    const resetPasswordTokenHash = PasswordService.hashToken(resetPasswordToken);
     let resetPasswordExpiresTime: any = process.env.RESET_PASSWORD_EXPIRE_TIME;
-    let resetPasswordExpires: any = new Date(
-      Date.now() + resetPasswordExpiresTime * 60 * 1000
-    );
+    let resetPasswordExpires: any = new Date(Date.now() + resetPasswordExpiresTime * 60 * 1000);
 
-    const link = `https://streaming-admin.devtechnosys.tech/auth/reset-password?token=${resetPasswordTokenHash}`;
+    const link = `https://msc-admin.devtechnosys.tech/auth/reset-password?token=${resetPasswordTokenHash}`;
 
     if (email_address) {
-      const template = await db("email_templates")
-        .where("slug", process.env.FORGOT_PASSWORD_ADMIN)
-        .where("status", 1)
+      const template = await db('email_templates')
+        .where('slug', process.env.FORGOT_PASSWORD_ADMIN)
+        .where('status', 1)
         .first();
 
       if (template) {
         let content = (template?.content || "")
           .replace("{adminName}", result.name)
-          .replace("{resetLink}", link);
+          .replace("{resetLink}", link)
 
         const mailOptions = {
           email: email_address,
@@ -265,10 +243,12 @@ export const forgotPassword = async (
       }
     }
 
-    await db("admins").where("id", result.id).update({
-      reset_password_token_hash: resetPasswordTokenHash,
-      reset_password_expire_at: resetPasswordExpires,
-    });
+    await db('admins')
+      .where('id', result.id)
+      .update({
+        reset_password_token_hash: resetPasswordTokenHash,
+        reset_password_expire_at: resetPasswordExpires
+      });
 
     apiRes.successResponse(res, ADMIN.emailSent);
   } catch (error: any) {
@@ -278,40 +258,38 @@ export const forgotPassword = async (
   }
 };
 
-export const resetPassword = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const resetPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     const { newPassword, token, email } = req.body;
     let date = new Date();
 
-    const result: any = await db("admins")
-      .where("reset_password_token_hash", token)
-      .select("id", "reset_password_token_hash", "reset_password_expire_at")
+    const result: any = await db('admins')
+      .where('reset_password_token_hash', token)
+      .select('id', 'reset_password_token_hash', 'reset_password_expire_at')
       .first();
 
     if (!result) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
-      return;
+      return
     }
 
     if (result && new Date(result.reset_password_expire_at) < date) {
       apiRes.errorResponse(res, AUTH.tokenExpired);
-      return;
+      return
     }
 
     const hash = await PasswordService.hashPassword(newPassword);
 
-    await db("admins").where("id", result.id).update({
-      password_hash: hash,
-      password_updated_at: db.fn.now(),
-      reset_password_token_hash: null,
-      reset_password_expire_at: null,
-      updated_at: db.fn.now(),
-    });
+    await db('admins')
+      .where('id', result.id)
+      .update({
+        password_hash: hash,
+        password_updated_at: db.fn.now(),
+        reset_password_token_hash: null,
+        reset_password_expire_at: null,
+        updated_at: db.fn.now()
+      });
 
     await TokenService.revokeAllAdminTokens(result.id, "Password reset");
 
@@ -323,45 +301,31 @@ export const resetPassword = async (
   }
 };
 
-export const changePassword = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const changePassword = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     if (!req.user) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
-      return;
+      return
     }
 
     const adminId = Number(req.user._id || req.user.id);
-    const result = await db("admins").where("id", adminId).first();
-    if (
-      !result ||
-      !(await PasswordService.verifyPassword(
-        req.body.oldPassword,
-        result.password_hash
-      ))
-    ) {
+    const result = await db('admins').where('id', adminId).first();
+    if (!result || !(await PasswordService.verifyPassword(req.body.oldPassword, result.password_hash))) {
       apiRes.errorResponse(res, ADMIN.passwordInvalid);
-      return;
+      return
     }
 
     if (req.body.newPassword !== req.body.confirmPassword) {
       apiRes.errorResponse(res, ADMIN.passwordNotMatched);
-      return;
+      return
     }
 
     const hash = await PasswordService.hashPassword(req.body.newPassword);
 
-    await db("admins")
-      .where("id", adminId)
-      .update({
-        password_hash: hash,
-        password_updated_at: db.fn.now(),
-        updated_at: db.fn.now(),
-      });
+    await db('admins')
+      .where('id', adminId)
+      .update({ password_hash: hash, password_updated_at: db.fn.now(), updated_at: db.fn.now() });
 
     // Revoke all existing tokens and sessions (logout everywhere)
     await TokenService.revokeAllAdminTokens(adminId, "Password changed");
@@ -374,21 +338,17 @@ export const changePassword = async (
   }
 };
 
-export const getAdminDetails = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const getAdminDetails = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
 
     if (!req.user) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
-      return;
+      return
     }
 
     const adminId = req.user._id || req.user.id;
-    const result = await db("admins").where("id", adminId).first();
+    const result = await db('admins').where('id', adminId).first();
 
     apiRes.successResponseWithData(res, SUCCESS.dataFound, result);
   } catch (error: any) {
@@ -398,49 +358,40 @@ export const getAdminDetails = async (
   }
 };
 
-export const editProfile = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const editProfile = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
     if (!req.user) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
-      return;
+      return
     }
 
     const adminId = req.user._id || req.user.id;
     const updateData = {
       name: req.body.name,
       email_address: req.body.email_address,
-      updated_at: db.fn.now(),
+      updated_at: db.fn.now()
     };
 
-    await db("admins").where("id", adminId).update(updateData);
+    await db('admins')
+      .where('id', adminId)
+      .update(updateData);
 
-    const result = await db("admins").where("id", adminId).first();
+    const result = await db('admins').where('id', adminId).first();
 
     apiRes.successResponseWithData(res, ADMIN.profileUpdated, result);
   } catch (error: any) {
-    log(error.message);
+    log(error.message)
     apiRes.errorResponse(res, ERROR.SomethingWrong);
-    return;
+    return
   }
 };
 
-export const getSetting = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const getSetting = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
 
-    const rows = await db("site_settings").select(
-      "setting_key",
-      "setting_value"
-    );
+    const rows = await db("site_settings").select("setting_key", "setting_value");
 
     // Convert rows into a clean JSON object
     const settings: any = {};
@@ -449,18 +400,15 @@ export const getSetting = async (
     });
 
     apiRes.successResponseWithData(res, SUCCESS.dataFound, settings);
+
   } catch (error: any) {
-    log(error.message);
+    log(error.message)
     apiRes.errorResponse(res, ERROR.SomethingWrong);
-    return;
+    return
   }
 };
 
-export const refreshToken = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+export const refreshToken = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { refreshToken } = req.body;
 
@@ -497,38 +445,38 @@ export const refreshToken = async (
 
     const clientIp = getClientIp(req);
     const userAgent = getUserAgent(req);
-    const { token: newRefreshToken, jti: newRefreshJti } =
-      await TokenService.rotateRefreshToken(
-        storedToken.jti,
-        null,
-        adminId,
-        clientIp,
-        userAgent
-      );
+    const { token: newRefreshToken, jti: newRefreshJti } = await TokenService.rotateRefreshToken(
+      storedToken.jti,
+      null,
+      adminId,
+      clientIp,
+      userAgent
+    );
+
+    const session = await db("session_tracking")
+      .where("refresh_token_jti", storedToken.jti)
+      .first();
 
     const { token: accessToken } = TokenService.generateAccessToken(
       adminId!,
       process.env.TOKEN_SECRET_KEY_1!,
-      process.env.ADMIN_TOKEN_EXPIRE || "24h"
+      process.env.ADMIN_TOKEN_EXPIRE || "24h",
+      session?.id
     );
 
     apiRes.successResponseWithData(res, "Token refreshed successfully", {
       accessToken,
       refreshToken: newRefreshToken,
-      expiresIn: process.env.ADMIN_TOKEN_EXPIRE || "24h",
+      expiresIn: process.env.ADMIN_TOKEN_EXPIRE || "24h"
     });
   } catch (error: any) {
-    log(error.message);
+    log(error.message)
     apiRes.errorResponse(res, ERROR.SomethingWrong);
-    return;
+    return
   }
 };
 
-export const logout = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const logout = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     if (!req.user) {
       apiRes.errorResponse(res, ADMIN.accountNotExists);
@@ -563,17 +511,13 @@ export const logout = async (
 
     apiRes.successResponse(res, ADMIN.logoutSuccess);
   } catch (error: any) {
-    log(error.message);
+    log(error.message)
     apiRes.errorResponse(res, ERROR.SomethingWrong);
-    return;
+    return
   }
 };
 
-export const updateSetting = async (
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export const updateSetting = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const db = getDB();
 
@@ -592,18 +536,17 @@ export const updateSetting = async (
           .update({
             setting_value: item.value,
             updated_at: db.fn.now(),
-            updated_by: req.user?.id ?? null,
+            updated_by: req.user?.id ?? null
           });
       }
     }
 
     // Fetch all updated settings
-    const updatedSettings = await db("site_settings").select(
-      "setting_key",
-      "setting_value"
-    );
+    const updatedSettings = await db("site_settings")
+      .select("setting_key", "setting_value");
 
     apiRes.successResponseWithData(res, ADMIN.settingUpdated, updatedSettings);
+
   } catch (error: any) {
     log(error.message);
     apiRes.errorResponse(res, ERROR.SomethingWrong);

@@ -63,12 +63,9 @@ export const loginStreamer = async (req: AuthenticatedRequest, res: Response, ne
         const clientIp = getClientIp(req);
         const userAgent = getUserAgent(req);
 
-        // Generate access token
-        const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
-            data.id,
-            process.env.TOKEN_SECRET_KEY_3!,
-            process.env.STREAMER_TOKEN_EXPIRE_TIME || "10d"
-        );
+        // Revoke all previous tokens and sessions (Single Session Policy)
+        await TokenService.revokeAllUserTokens(data.id, "Streamer login on new device");
+        await SessionService.endAllUserSessions(data.id);
 
         const { token: refreshToken, jti: refreshJti, hash: refreshTokenHash } = TokenService.generateRefreshToken();
         const refreshExpiresAt = new Date();
@@ -91,6 +88,14 @@ export const loginStreamer = async (req: AuthenticatedRequest, res: Response, ne
             clientIp,
             userAgent,
             refreshJti
+        );
+
+        // Generate access token
+        const { token: accessToken, jti: accessJti } = TokenService.generateAccessToken(
+            data.id,
+            process.env.TOKEN_SECRET_KEY_3!,
+            process.env.STREAMER_TOKEN_EXPIRE_TIME || "10d",
+            sessionId
         );
 
         await db('users')
@@ -323,10 +328,19 @@ export const refreshToken = async (req: Request, res: Response, next: NextFuncti
             userAgent
         );
 
+        const session = await db("session_tracking")
+            .where("refresh_token_jti", storedToken.jti)
+            .first();
+
+        // If no session found or inactive, we might still issue token but without session ID (safer to require session?)
+        // For consistency with Single Session, we should require active session.
+        // But for refresh, we are extending the session.
+
         const { token: accessToken } = TokenService.generateAccessToken(
             userId!,
             process.env.TOKEN_SECRET_KEY_3!,
-            process.env.STREAMER_TOKEN_EXPIRE_TIME || "24h"
+            process.env.STREAMER_TOKEN_EXPIRE_TIME || "24h",
+            session?.id
         );
 
         await db("session_tracking")
