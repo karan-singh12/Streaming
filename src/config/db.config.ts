@@ -1,26 +1,26 @@
 import knex, { Knex } from "knex";
+import { config as appConfig } from "./index";
 
 let db: Knex;
 
 const connectDB = async (): Promise<void> => {
   try {
-    const environment = process.env.NODE_ENV || "development";
+    const environment = appConfig.env;
 
-    // Get database configuration from environment variables or use defaults
+    // Get database configuration from centralized config
     const config: Knex.Config = {
       client: "pg",
-      connection: process.env.DB_URL || {
-        host: process.env.DB_HOST || "localhost",
-        port: parseInt(process.env.DB_PORT || "5432"),
-        user: process.env.DB_USER || "postgres",
-        password: process.env.DB_PASS || "",
-        database: process.env.DB_NAME || "streaming_live",
-        ssl:
-          process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+      connection: appConfig.db.url || {
+        host: appConfig.db.host,
+        port: appConfig.db.port,
+        user: appConfig.db.user,
+        password: appConfig.db.pass,
+        database: appConfig.db.name,
+        ssl: appConfig.db.ssl ? { rejectUnauthorized: false } : false,
       },
       pool: {
-        min: parseInt(process.env.DB_POOL_MIN || "2"),
-        max: parseInt(process.env.DB_POOL_MAX || "10"),
+        min: appConfig.db.pool.min,
+        max: appConfig.db.pool.max,
       },
       migrations: {
         directory: "./src/migrations",
